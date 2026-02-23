@@ -141,6 +141,7 @@ def create_app() -> FastAPI:
             repo_manifest = settings.repos_path / body.repo_id / "manifest.json"
             if not repo_manifest.exists():
                 raise HTTPException(status_code=404, detail="Repo not found. Ingest the repo first.")
+            # Agent first; on any exception (e.g. agent or RAG failure inside run_agent), fall back to RAG
             if body.use_agent:
                 try:
                     out = run_agent_runner(

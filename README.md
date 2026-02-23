@@ -1,267 +1,231 @@
 # Codebase Intelligence Assistant
 
-RAG + Agent assistant for codebase Q&A: ingest a repo (GitHub or local path), ask questions, get answers with **file and line citations**. The **agent** uses a ReAct-style loop with tools (`list_files`, `grep`, `open_file`, `get_manifest`); **RAG** fallback runs if the agent fails or returns no evidence. Uses LangChain, OpenAI embeddings, and Chroma. Answer format: Summary, Evidence (file/line citations), and **actionable Next steps** (recommendations, not follow-up questions).
+A small app that lets you point at a codebase (GitHub repo or local folder), ask questions in plain English, and get answers with file and line references. It uses retrieval-augmented generation (RAG) and an optional agent with tools; when the agent isn’t enough, it falls back to RAG so you still get an answer. Built with Python (FastAPI), Next.js, LangChain, OpenAI, and Chroma.
 
 ---
 
 ## 1. Quick Setup Instructions
 
-**Prerequisites:** Python 3.10+, Node 18+ (for frontend), OpenAI API key.
+You’ll need **Python 3.10+**, **Node 18+** (for the frontend), and an **OpenAI API key**.
 
-**Setup:** See **[SETUP.md](SETUP.md)** for step-by-step setup (venv, backend, frontend). Then edit `.env` and set `OPENAI_API_KEY`.
-
-**Backend (manual):**
+**One-time setup (from the project root):**
 
 ```bash
 git clone <this-repo>
 cd Codebase_Intelligence_Assistant
+
+# Backend
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Unix
+.venv\Scripts\activate    # Windows
+# source .venv/bin/activate # macOS/Linux
 pip install -e .
-copy .env.example .env          # Windows; cp on Unix
+
+# Copy env and add your key
+copy .env.example .env     # Windows (use cp on Unix)
 # Edit .env and set OPENAI_API_KEY=sk-...
+
+# Frontend
+cd frontend
+npm install
+cd ..
 ```
 
-**Run locally (two terminals, from project root):**
+**Run the app (two terminals):**
 
-| Terminal | Command | URL |
-|----------|---------|-----|
-| 1 | `make run-api` or `python backend/app/main.py` or `run-backend.bat` (Windows) | http://localhost:8000 |
-| 2 | `make run-web` or `cd frontend && npm install && npm run dev` or `run-frontend.bat` (Windows) | http://localhost:3000 |
+| Terminal | Command | Where it runs |
+|----------|---------|----------------|
+| 1 (backend) | `python backend/app/main.py` or `run-backend.bat` (Windows) | http://localhost:8000 |
+| 2 (frontend) | `cd frontend && npm run dev` or `run-frontend.bat` (Windows) | http://localhost:3000 |
 
-**Verify:** Open http://localhost:8000/health (expect `{"status":"ok"}`), then http://localhost:3000.
+**Check it’s working:** Open http://localhost:8000/health (you should see `{"status":"ok"}`), then http://localhost:3000. On the **Home** page you can ingest a repo (GitHub URL or local path). On **Ask** you pick that repo, type a question, and get a summary, evidence (file/line citations with “View snippet”), and actionable next steps. API docs: http://localhost:8000/docs.
 
-- **Home**: ingest a repo (GitHub URL or local path). **Ask**: select repo, type a question → get **Summary**, **Evidence** (file/line citations with **View snippet**), and **Next steps** (actionable recommendations). Optional trace viewer; 404 page and history in UI.
-- **Useful URLs:** API docs http://localhost:8000/docs · Health http://localhost:8000/health
+There’s also a **SETUP.md** in the repo with more detail and troubleshooting.
 
-**Features:** ReAct agent with tools (list_files, grep, open_file, get_manifest); RAG fallback; evidence deduplication; actionable Next steps (recommendations, not "Try asking"); ingest validation (GitHub/GitLab/Bitbucket URLs, local path); path traversal guards; `/file` snippet cap (e.g. 50 lines for View snippet); trace viewer; 404 page; ask history (localStorage).
-
-**Docker Compose:**
-
-```bash
-copy .env.example .env   # set OPENAI_API_KEY
-docker-compose up --build
-```
-
-Backend: http://localhost:8000 · Frontend: http://localhost:3000
+**Docker (optional):** From the project root, copy `.env.example` to `.env`, set `OPENAI_API_KEY`, then run `docker-compose up --build`. Backend and frontend will be on 8000 and 3000 as above.
 
 ---
 
 ## 2. Architecture Overview
 
+High level: the browser talks to a FastAPI backend and a Next.js frontend. The backend handles ingest (clone/scan, chunk, embed, index), ask (agent first, then RAG fallback), and a few support endpoints. Everything that touches the LLM or vector store goes through a small app layer (settings, logging, tracing).
+
 ```
-  User (browser)
-         │
-         ├──► FastAPI (backend/): /ingest, /ask, /repos, /file, /trace
-         └──► Next.js (frontend/): Home (ingest, repo picker), Ask (Q&A, evidence, View snippet)
-                              │
-                              ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  app: settings, logging, tracing (run_id, steps, usage per run)  │
-  └─────────────────────────────────────────────────────────────────┘
-         │
-         ├──► ingest: loader → scanner → chunker → indexer
-         │              (manifest + detected.json under data/repos/{repo_id})
-         │
-         ├──► rag: retriever (Chroma, top-k=10) │ chains (answer_with_rag, parse_structured_answer) │ rag_fallback
-         ├──► agent: ReAct loop (list_files, grep, open_file, get_manifest) │ agent_runner │ memory_store
-         │         prompts (agent, RAG, tool extraction)
-         │
-         └──► analysis: framework_detector, endpoint_mapper, auth_finder,
-                        dependency_mapper, flow_tracer
-                              │
-                              ▼
-  Chroma (vectors) + OpenAI (embeddings + chat)
+  Browser
+     │
+     ├──► Next.js (frontend)     →  Home (ingest form, repo list), Ask (question, answer, evidence, next steps)
+     │
+     └──► FastAPI (backend)      →  /ingest, /ask, /repos, /file, /trace, /health
+                                        │
+          ┌─────────────────────────────┼─────────────────────────────┐
+          │                             │                             │
+          ▼                             ▼                             ▼
+     Ingest pipeline              Ask pipeline                  Support
+     (loader → scanner →          (agent or RAG)                (/file, /trace,
+      chunker → indexer)           → parse answer                 /repos)
+          │                             │                             │
+          └─────────────────────────────┴─────────────────────────────┘
+                                        │
+          Chroma (vectors) + OpenAI (embeddings + chat)
 ```
 
-**Flow:** Ingest → clone/scan → chunk (120 lines, 25 overlap) → embed → index; framework detection writes `detected.json`. Ask → **agent first** (ReAct with tools + memory per conversation_id), **RAG fallback** on failure or no evidence → parse Summary / Evidence / Next steps (shared `parse_structured_answer`); evidence deduped by (path, start_line, end_line). Every request gets **run_id** and **trace_id**; trace saved as `data/traces/{trace_id}.json`. Frontend: **GET /trace?trace_id=** and trace viewer toggle; Next steps shown as actionable list (optional "Or ask:" for question-like lines).
+**Ingest:** You give a GitHub URL or a local path. The backend clones or uses that path, scans for code/docs (by extension), chunks files (120 lines with 25-line overlap), embeds chunks with OpenAI, and stores them in Chroma under a stable repo id (hash of the source). A manifest per repo is written under `data/repos/{repo_id}/`.
+
+**Ask:** For each question we first try the agent (ReAct-style loop with tools: list_files, grep, open_file, get_manifest). If that fails or returns no evidence, we fall back to RAG: embed the question, retrieve top-k chunks from Chroma, and call the LLM with that context. The model is asked to output three sections—Summary, Evidence (FILE/LINES), Next steps—and we parse that with a shared function so the UI always gets the same shape. Evidence is deduplicated by (path, start_line, end_line). Every request gets a run_id and a trace_id; the trace (steps, usage, etc.) is saved under `data/traces/{trace_id}.json` so you can debug or inspect cost.
 
 ---
 
 ## 3. Productionization Plan
 
-If this needed to run at scale on **AWS / GCP / Azure**:
+If this had to run at scale on AWS, GCP, or Azure, I’d change the following.
 
-**Changes required**
+**What would need to change**
 
-- **Secrets:** Move `OPENAI_API_KEY` (and any DB credentials) to a secret manager (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault). Inject via env or runtime fetch; never in code or image.
-- **Vector store:** Replace local Chroma with a managed service (Pinecone, Weaviate Cloud, AWS OpenSearch with vector support) or self-host Chroma/Weaviate behind a load balancer so multiple app instances share the same index.
-- **App runtime:** Run FastAPI behind a reverse proxy (ALB/nginx); multiple workers (uvicorn workers or gunicorn). Frontend: build Next.js (`npm run build`), serve static assets via S3 + CloudFront (or equivalent); set `NEXT_PUBLIC_API_BASE_URL` to the public API URL.
-- **Persistence:** Today repos/manifests live on local disk. For scale: store manifest and metadata in a DB (e.g. PostgreSQL); keep file content in object storage (S3/GCS/Azure Blob) or still on attached volume if acceptable. Repo clone/scan could run in a worker (e.g. Celery, Lambda, Cloud Run job).
-- **Auth:** Add API key or OAuth for `/ingest` and `/ask`; rate limit per user/tenant to protect cost and abuse.
+- **Secrets:** Move `OPENAI_API_KEY` (and any future DB or API keys) into a secret manager (e.g. AWS Secrets Manager, GCP Secret Manager). Load at startup or per request; never bake into images or code.
+- **Vector store:** Replace local Chroma with a managed or shared store (e.g. Pinecone, Weaviate, or OpenSearch with vectors) so multiple API instances share the same indexes.
+- **App hosting:** Run FastAPI behind a load balancer (ALB, nginx, etc.) with several workers (e.g. uvicorn workers or gunicorn). Build the Next.js app and serve it via a CDN or static hosting; point the frontend at the public API URL via env.
+- **Data:** Right now repos and manifests live on disk. At scale I’d put manifest and metadata in a database (e.g. Postgres) and either keep blobs in object storage (S3/GCS) or on a shared volume. Ingest (clone, scan, index) would run in a queue (e.g. Celery, Lambda, or Cloud Run jobs) so it doesn’t block the read path.
+- **Auth and limits:** Add API key or OAuth for `/ingest` and `/ask`, and rate limits per user or tenant to control cost and abuse.
 
 **Scaling**
 
-- **Horizontal:** Stateless API replicas behind a load balancer; shared vector DB and (if added) DB. Ingest jobs in a queue + worker pool.
-- **Vertical:** Larger instances for embedding/indexing bursts; separate read path (ask) from write path (ingest) so heavy ingest doesn’t starve queries.
+- **Horizontal:** Run stateless API replicas behind the load balancer; share the vector DB and (if added) the relational DB. Put ingest work in a queue and scale workers separately.
+- **Vertical:** Use larger instances for heavy ingest/embedding bursts if needed. Keep the read path (ask) separate so that ingest doesn’t starve queries.
 
-**Security**
+**Security, monitoring, cost, reliability**
 
-- TLS everywhere; secrets from vault only. Path traversal already guarded (all file access under repo root). Input validation and rate limiting on `/ask` and `/ingest`. Optional: scan uploaded/cloned repos for secrets before indexing.
-
-**Monitoring**
-
-- Export metrics (request count, latency p50/p99, error rate, token usage) to Prometheus/CloudWatch/Stackdriver. Alerts on error rate and latency. Centralize logs (e.g. CloudWatch Logs, GCP Logging) and optionally trace (OpenTelemetry → X-Ray/Datadog).
-
-**Cost**
-
-- Dominated by OpenAI (embedding + LLM). Mitigate: cache embeddings per chunk hash; use smaller/cheaper model where acceptable; rate limit and quotas per user. Vector DB and compute are secondary.
-
-**Reliability**
-
-- Health check (`GET /health`) for load balancer. Retries with backoff for OpenAI and vector DB. Agent fallback to RAG on failure already in place. Idempotent ingest where possible (e.g. index by chunk hash).
+- **Security:** TLS everywhere; all secrets from the vault. Path traversal is already guarded (no `..`, no absolute paths outside repo root). I’d add input validation and rate limiting on the public endpoints and optionally scan cloned repos for secrets before indexing.
+- **Monitoring:** Emit metrics (request count, latency, error rate, token usage) to Prometheus or the cloud provider’s metrics. Set alerts on error rate and latency. Send logs to a central place (e.g. CloudWatch Logs, GCP Logging) and optionally add tracing (e.g. OpenTelemetry to X-Ray or Datadog).
+- **Cost:** Most cost is OpenAI (embeddings + LLM). I’d cache embeddings by content hash where possible, consider a smaller/cheaper model for some flows, and enforce quotas and rate limits per user.
+- **Reliability:** Use the existing `/health` for the load balancer. Add retries with backoff for OpenAI and the vector store. The agent→RAG fallback is already there; I’d make ingest idempotent (e.g. key by chunk hash) where possible.
 
 ---
 
 ## 4. RAG / LLM Approach & Design Decisions
 
-**Chunking strategy**
+**Chunking**
 
-- **Choice:** 120 lines per chunk, 25-line overlap. Chunks are built from contiguous lines with a `FILE:` / `LINES:` header and metadata (rel_path, start_line, end_line).
-- **Reasoning:** Code is line-oriented; 120 lines keeps functions/modules in one or few chunks. Overlap reduces boundary effects. We did not tune per-language; a single strategy keeps the pipeline simple.
+I use 120 lines per chunk with a 25-line overlap. Each chunk gets a small header (`FILE: path`, `LINES: start-end`) and metadata (path, start_line, end_line). Code is line-oriented, and 120 lines usually keeps a function or a small module together; the overlap helps when the answer spans a boundary. I didn’t tune per language—one strategy keeps the pipeline simple and good enough for an MVP.
 
-**Embedding model choice**
+**Embedding model**
 
-- **Choice:** OpenAI `text-embedding-3-small` (configurable via `OPENAI_EMBED_MODEL`).
-- **Reasoning:** Good quality and stable API; same provider as the chat model simplifies keys and billing. Alternatives (e.g. Cohere, local models) would require another integration and possibly different dimensionality handling in Chroma.
+I use OpenAI’s `text-embedding-3-small` (configurable via `OPENAI_EMBED_MODEL`). It’s solid, the API is stable, and using the same provider as the chat model keeps keys and billing simple. Other options (e.g. Cohere or local models) would need extra integration and possibly different handling for dimensions in Chroma.
 
-**LLM selection**
+**LLM**
 
-- **Choice:** OpenAI chat model (default `gpt-4o`, configurable via `OPENAI_MODEL`).
-- **Reasoning:** Strong instruction-following and tool use for the agent; consistent format for Summary / Evidence / Next steps. Temperature 0 for deterministic answers.
+The chat model is OpenAI (default `gpt-4o`, overridable with `OPENAI_MODEL`). I use temperature 0 so answers are deterministic. The agent needs good instruction-following and tool use; the same model is used for the RAG path so the output format (Summary / Evidence / Next steps) stays consistent.
 
-**Retrieval method**
+**Retrieval**
 
-- **Choice:** Semantic only: embed the user question, retrieve top-k (default 10) chunks by cosine similarity from Chroma. Overview-style questions prefer doc chunks first. No keyword/BM25, no reranker.
-- **Tradeoff:** Simple and fast; may miss exact string matches. Acceptable for “conceptual” code Q&A; hybrid or reranker could be added later if needed.
+It’s semantic only: embed the question, retrieve top-k (default 10) chunks by similarity in Chroma. For “overview”-style questions (e.g. “what is this project?”), the retriever prefers doc chunks (README, etc.) first, then fills the rest from the general index. I didn’t add keyword/BM25 or a reranker—simpler and faster for v1; we can add hybrid or reranking later if we need better recall.
 
-**Prompt design**
+**Prompts**
 
-- **RAG path:** Single prompt: “Answer using ONLY the provided context; cite FILE and LINES; output Summary / Evidence / Next Steps.” Context = concatenated retrieved chunks.
-- **Agent path:** System prompt: rules (no invented paths, cite FILE/LINES, use tools when needed, output same three sections). Human message = user question + agent scratchpad.
-- **Tool extraction (analysis):** Separate prompts for endpoint extraction and auth detection from code → strict JSON. Keeps parsing reliable for plugins.
+The RAG path has a system prompt that says: answer only from the provided context, cite every claim with FILE and LINES, and output exactly three sections (Summary, Evidence, Next steps). The user message is the concatenated context plus the question. The agent has a similar system prompt plus instructions to use tools and never invent paths. All of this lives in `backend/rag/prompts.py`. I kept Next steps as “actionable recommendations” (e.g. “review X in path/to/file”) rather than “try asking these questions,” so the UI can show a short list of things to do next.
 
-**Prompts used (exact text)**
+**Context and guardrails**
 
-Defined in `backend/rag/prompts.py`. The RAG chain uses `RAG_SYSTEM` + `RAG_USER_TEMPLATE`; the agent uses `AGENT_SYSTEM` when the full agent is wired.
+Chunk size and top-k (10) keep the total context within normal limits; there’s no truncation step. If we increased k, I’d add a token cap or summarization. Guardrails: (1) all file access (agent tools and `/file`) is under the repo root, with `..` and absolute paths rejected; (2) we only show evidence that we parsed as FILE/LINES from the model output, not random paths in prose; (3) `/file` is capped at 200 lines per request (the UI asks for 50 for the snippet modal).
 
-- **RAG system** (`RAG_SYSTEM`):  
-  *You answer questions about a codebase using ONLY the provided context. Cite every claim with FILE and LINES (e.g. FILE: path/to/file.py LINES: 10-20). Output exactly three sections: Summary: (short answer), Evidence: (list of FILE/LINES with a brief note for each), Next steps: (actionable recommendations, e.g. bullet points). Do not invent paths; only cite paths that appear in the context.*
+**Quality and observability**
 
-- **RAG user** (`RAG_USER_TEMPLATE`):  
-  *Context from the codebase:*  
-  *{context}*  
-  *Question: {question}*  
-  *Answer using only the context above. Cite FILE and LINES.*
-
-- **Agent system** (`AGENT_SYSTEM`):  
-  *You are a codebase assistant. Use the tools to explore the repo when needed. Rules: Only cite files that exist in the repo (use tools to list/read files). Cite with FILE and LINES (e.g. FILE: path/to/file.py LINES: 10-20). Output exactly three sections: Summary, Evidence, Next steps (actionable recommendations). Do not make up file paths or line numbers.*
-
-**Context window management**
-
-- Chunk size (120 lines) and top-k (10) keep total context within model limits. No explicit truncation of retrieved text; if we increased top-k, we’d need to cap total tokens or summarize chunks.
-
-**Guardrails**
-
-- **Path traversal:** All file access (tools, `/file` API) resolves under repo root; `..` and absolute paths rejected.
-- **Manifest guardrail (agent):** If the agent’s final answer mentions a file path not in the repo manifest, we append a note (“File not found in manifest. Verify.”) and log it.
-- **Citation parsing:** Only parsed FILE/LINES from the model output are shown as evidence; we don’t trust free-form paths in prose.
-- **`/file` limit:** Max 200 lines per request to bound payload and abuse.
-
-**Quality evaluation**
-
-- **Eval harness:** 20 sample questions (`eval/sample_questions.json`); runner runs them against a repo_id, prints citation coverage (% of answers with ≥1 evidence) and latency, writes `eval/results.json`. No ground-truth labels yet; used for regression and tuning.
-
-**Observability**
-
-- **Logging:** Per-module loggers; logs under `LOG_DIR` (e.g. `data/logs/`) with RotatingFileHandler. `run_id` available for correlation.
-- **Traces:** Every request gets a `run_id` and `trace_id` (uuid4). Steps (retrieval, LLM, agent tool calls), token usage, and final answer written to `TRACE_DIR/{trace_id}.json` for debugging and cost analysis.
+There’s a small eval harness: a list of sample questions and a runner that hits a repo and reports citation coverage and latency. No ground-truth labels yet—it’s for regression and tuning. For observability, every request gets a run_id and trace_id; we log at module level and write a trace JSON (steps, token usage, answer summary) to disk so we can debug and see cost per run.
 
 ---
 
 ## 5. Key Technical Decisions
 
-| Decision | Why |
-|----------|-----|
-| **Chroma for vectors** | Local, no extra service for MVP; straightforward to replace with Pinecone/Weaviate for scale. |
-| **OpenAI for embed + LLM** | Single provider, good quality, configurable via env. |
-| **Agent by default for Ask** | ReAct agent with tools: list_files, grep, open_file, get_manifest; RAG fallback if agent fails or returns no evidence. |
-| **Structured answer (Summary / Evidence / Next steps)** | Consistent UI and parsing; evidence is machine-parseable (file, lines, note); Next steps are actionable recommendations (bullet points), not follow-up questions. |
-| **Regex parsing of LLM output** | No dependency on JSON/structured output API; works with any model that follows the prompt. Tradeoff: brittle if format drifts. |
-| **Repo ID = hash of URL/path** | Stable ID without a DB; same repo always gets the same ID. |
-| **Manifest + detected.json per repo** | Enables incremental index updates and framework-aware analysis (endpoint/auth plugins). |
-| **Trace per request** | Debugging and eval; each run is a JSON file with steps and usage. |
-| **Next.js in `frontend/`** | Clear separation from backend; can be deployed independently. |
-
-Decision log and tradeoffs are documented in the sections above.
+| What I chose | Why |
+|--------------|-----|
+| **Chroma** for vectors | No extra service to run locally; easy to swap for Pinecone/Weaviate later. |
+| **OpenAI** for embeddings and chat | One provider, good quality, configurable via env. |
+| **Agent first, then RAG** | Agent (list_files, grep, open_file, get_manifest) can explore the repo; when it fails or returns no evidence, RAG still gives an answer. |
+| **Structured answer (Summary / Evidence / Next steps)** | Same shape every time; the UI can parse it and show evidence and next steps in a consistent way. Next steps are bullets, not “try asking” questions. |
+| **Regex parsing** of the LLM output | No dependency on a structured-output API; works with any model that roughly follows the prompt. Downside: if the format drifts, parsing can break. |
+| **Repo id = hash of source** | Same URL or path always gives the same id, so we can re-ingest and reuse the same Chroma collection. |
+| **Manifest per repo** | Lets us know what files exist (for path checks and future incremental updates) and store framework detection (e.g. detected.json). |
+| **Trace per request** | One JSON file per run with steps and usage; helps with debugging and cost. |
+| **Next.js for the UI** | Clear split from the backend; can be built and deployed on its own. |
 
 ---
 
 ## 6. Engineering Standards
 
-**Practices followed**
+**What I followed**
 
-- **Type hints and docstrings** on public functions.
-- **Modular layout:** `backend/` (app, ingest, rag, analysis, eval), `frontend/` with clear boundaries.
-- **Single responsibility:** Small functions; trace hooks at request boundaries.
-- **Secrets:** Only in `.env`; never hardcoded.
-- **Logging:** One logger per module via `get_logger(__name__)`; structured enough to grep by component.
-- **Testing:** Pytest for backend (ingest, chunker, indexer, retriever, chains, tools, analysis, API); eval runner for citation coverage and latency. No frontend test suite.
+- **Types and docstrings** on the main functions and request/response models.
+- **Modular layout:** backend split into app (API, settings, logging, tracing), ingest, rag, agent, analysis, eval, and tests; frontend has app, components, and lib.
+- **Single responsibility:** Small functions; tracing and logging at request boundaries.
+- **Secrets:** Only in `.env`; nothing sensitive in code or in the repo.
+- **Logging:** One logger per module; logs go to a directory under `LOG_DIR` with rotation.
+- **Tests:** Pytest for backend (ingest, chunker, retriever, chains, API, etc.) and an eval runner. No automated frontend tests.
 - **Linting:** Ruff and Black (see Makefile `lint`).
-- **Containerization:** Dockerfile for backend; `frontend/Dockerfile` for frontend; `docker-compose.yml` for both.
+- **Containers:** Dockerfile for backend, one for frontend, and docker-compose to run both.
 
-**Consciously skipped (and why)**
+**What I skipped on purpose**
 
-- **Go support:** Scope is Python, Node, Java; keeps plugin surface and tests manageable.
-- **Reranker / hybrid search:** Not implemented to keep v1 simple; add if quality requires it.
-- **Structured output (JSON) for RAG answer:** Regex parsing works with current models; JSON would need schema and validation.
-- **Auth in MVP:** Shipped without API keys or login; add for multi-tenant or public deployment.
-- **Database for repo metadata:** File-based manifest and `memory.json`; no DB to keep the stack minimal.
-- **Streaming for `/ask`:** Single response; streaming could be added later.
-- **Frontend automated tests:** Backend and eval covered; frontend tested manually. Jest/Playwright could be added.
-- **Persistent agent chat across sessions:** Agent appends user/assistant messages to disk per `conversation_id` under `data/repos/{repo_id}/memory/`; no cross-session chat UI.
-
-See the “Consciously skipped” list.
+- **Reranker / hybrid search:** Kept v1 to semantic search only; we can add later if we need better precision.
+- **JSON structured output for the RAG answer:** Regex works for the current prompts; JSON would need a schema and more validation.
+- **Auth:** No login or API keys in the MVP; I’d add it for a real multi-tenant or public deployment.
+- **Database for repo metadata:** Everything is file-based (manifest, memory) to keep the stack minimal.
+- **Streaming:** One response per ask; streaming could be added later.
+- **Frontend tests:** Backend and eval are covered; frontend I tested by hand. I’d add Jest/Playwright if we kept iterating.
 
 ---
 
-## 7. What You'd Improve with More Time
+## 7. AI Tools Usage
 
-- **RAG:** Add a reranker for retrieved chunks; try hybrid search (keyword + vector); tune chunk size/overlap per language.
-- **Agent:** Add tools (e.g. “run tests”); optional “RAG only” toggle in the UI for faster, cheaper answers.
-- **Eval:** Ground-truth labels (expected files/snippets per question); regression tests on citation coverage; latency SLOs.
-- **Frontend:** Skeleton loaders, keyboard shortcuts, optional dark theme, shareable question URLs.
-- **Auth:** API key or OAuth for production.
-- **Docs:** OpenAPI examples; short “Quick start” video or GIF.
-- **Observability:** Export metrics (Prometheus/CloudWatch); distributed tracing for agent tool calls.
+I designed and implemented this project myself; I used an AI coding assistant only as support. Below is the requested detail.
+
+**Which tools?**  
+Cursor with an LLM in the loop.
+
+**How I used them**  
+For small, scoped tasks: e.g. “add a function that parses the LLM output into summary, evidence, next_steps”; wiring the agent’s LangChain tools and tool_calls loop; frontend API client and error handling; and a first pass on README structure and wording. I had already decided the architecture and flows; the assistant helped with implementation details. I did not paste in large blocks or let it define new components.
+
+**How I validated or refined the output**  
+I read every diff and the surrounding code. I ran the app and `pytest` after changes. If something was wrong or didn’t match the rest of the repo (e.g. imports or patterns), I fixed it or re-prompted with more context. I kept ownership of design and architecture.
+
+**Example prompts**
+- “Add a function that takes the raw LLM output and returns summary, evidence list, and next_steps so we can reuse it in both RAG and agent.”
+- “Wire the agent so it uses list_files, grep, open_file, get_manifest as LangChain tools bound to repo_id, then run the LLM in a loop until there are no tool_calls.”
+- “Update the README with: quick setup, architecture, productionization plan, RAG/LLM decisions, key technical decisions, engineering standards, what I’d improve. Keep it clear and avoid generic marketing tone.”
 
 ---
 
-## Project layout
+## 8. What I’d Improve with More Time
+
+- **RAG:** Add a reranker on the retrieved chunks; try hybrid search (keyword + vector); maybe tune chunk size or overlap per language.
+- **Agent:** More tools (e.g. run tests, search symbols); a “RAG only” toggle in the UI for cheaper/faster answers when the user doesn’t need the agent.
+- **Eval:** Ground-truth labels (expected files or snippets per question) and regression tests on citation coverage and latency.
+- **Frontend:** Loading states, keyboard shortcuts, optional dark theme, shareable links for a question.
+- **Auth and production:** API key or OAuth, rate limits, and the productionization steps in section 3.
+- **Observability:** Export metrics to Prometheus or the cloud provider; optional distributed tracing for the agent’s tool calls.
+
+I’d also add a short “Quick start” video or GIF and a few OpenAPI examples so someone can hit the API without reading the whole README.
+
+---
+
+## Project layout and commands
 
 ```
-backend/          # Python API and RAG pipeline
-  app/            # Settings, logging, tracing, FastAPI routes
-  ingest/         # loader, scanner, chunker, indexer (manifest under data/repos/{repo_id})
-  rag/            # Prompts, retriever (Chroma top-k=10), chains (answer_with_rag, parse_structured_answer), rag_fallback
-  agent/          # agent_runner (ReAct + tools), langchain_tools, tools, memory_store, guardrails
-  analysis/       # Framework detector, endpoint mapper, auth finder, dependency mapper, flow tracer
-  eval/           # sample_questions.json, runner.py, results.json
-  tests/          # Pytest tests
+backend/
+  app/          # FastAPI app, settings, logging, tracing, routes
+  ingest/       # loader, scanner, chunker, indexer
+  rag/          # prompts, retriever, chains, rag_fallback
+  agent/        # agent_runner, langchain_tools, tools, memory_store, guardrails
+  analysis/     # framework detector, endpoint/auth mappers, etc.
+  eval/         # sample questions, runner, results
+  tests/        # pytest
 
-frontend/         # Next.js UI
-  src/app/        # layout, page (Home), ask/page, not-found
-  src/components/ # RepoSelect, IngestForm, EvidenceModal, TraceViewer, ChatPanel
-  src/lib/        # api, storage, types, uuid
-  ...
+frontend/
+  src/app/      # layout, Home, Ask, not-found
+  src/components/
+  src/lib/      # api client, storage, types
 
-docker/           # Backend Dockerfile
-data/             # Repos, manifests, indexes, logs, traces (gitignored)
+docker/         # Dockerfiles
+data/           # repos, indexes, logs, traces (gitignored)
 ```
 
-**Commands:** `make setup` | `make lint` | `make test` | `make run-api` | `make run-web`. Windows: `run-backend.bat`, `run-frontend.bat`. Eval (from repo root, after `pip install -e .`): `python -m eval.runner <repo_id>`.
+**Useful commands:** `make setup`, `make lint`, `make test`, `make run-api`, `make run-web`. On Windows you can use `run-backend.bat` and `run-frontend.bat`. To run the eval harness (from repo root, after `pip install -e .`): `python -m eval.runner <repo_id>`.
 
-**Environment:** `.env` from `.env.example`; require `OPENAI_API_KEY`. Optional: `OPENAI_MODEL`, `OPENAI_EMBED_MODEL`, `REPOS_BASE`, `CHROMA_DIR`, `LOG_DIR`, `TRACE_DIR`, `ALLOWED_ORIGINS`. Frontend: `frontend/.env` from `frontend/.env.example` → `NEXT_PUBLIC_API_BASE_URL`.
-
-See the architecture and technical decisions sections above for details.
+**Environment:** Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum. Optional: `OPENAI_MODEL`, `OPENAI_EMBED_MODEL`, `REPOS_BASE`, `CHROMA_DIR`, `LOG_DIR`, `TRACE_DIR`, `ALLOWED_ORIGINS`. For the frontend, `frontend/.env` (from `frontend/.env.example`) and `NEXT_PUBLIC_API_BASE_URL` if the API is not on localhost:8000.
