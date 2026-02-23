@@ -1,0 +1,67 @@
+# Environment and secrets (never commit real keys)
+.env
+.env.local
+.env.*.local
+*.env.local
+*.log
+
+# Data and indexes (generated at runtime)
+data/
+indexes/
+logs/
+traces/
+
+# Obsolete (use frontend/ instead)
+web/
+web_old/
+
+# Python (lib/ and lib64/ only at repo root – avoid ignoring frontend/src/lib)
+/lib/
+/lib64/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# Testing / coverage
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+
+# Node / frontend
+node_modules/
+.next/
+
+# OS
+.DS_Store
+Thumbs.db

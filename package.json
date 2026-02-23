@@ -1,0 +1,9 @@
+{
+  "name": "codebase-intelligence-assistant",
+  "private": true,
+  "scripts": {
+    "web:dev": "cd frontend && npm run dev",
+    "web:build": "cd frontend && npm run build",
+    "web:start": "cd frontend && npm run start"
+  }
+}

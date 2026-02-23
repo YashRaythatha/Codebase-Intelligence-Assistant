@@ -1,0 +1,22 @@
+[
+  "Where is the main entry point of the application?",
+  "How is authentication handled?",
+  "Where are API routes defined?",
+  "How does the database connection work?",
+  "Where is configuration loaded?",
+  "How are errors handled?",
+  "Where are dependencies installed or defined?",
+  "How is logging configured?",
+  "Where is the frontend served from?",
+  "How does the app start the server?",
+  "Where are environment variables read?",
+  "How is CORS configured?",
+  "Where is the request/response model defined?",
+  "How does the app connect to the vector store?",
+  "Where are embeddings created?",
+  "How is chunking done for RAG?",
+  "Where is the LLM or chat model invoked?",
+  "How are file paths validated for security?",
+  "Where is the repo manifest stored?",
+  "How can I run the eval harness?"
+]

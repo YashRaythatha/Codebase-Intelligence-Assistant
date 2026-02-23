@@ -1,0 +1,5 @@
+"""API package: schemas and routes."""
+
+from app.api.routes import create_app
+
+__all__ = ["create_app"]

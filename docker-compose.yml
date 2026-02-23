@@ -1,0 +1,31 @@
+# Backend + Frontend
+# Backend: 8000. Frontend: 3000. Set OPENAI_API_KEY in .env.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - CHROMA_DIR=/app/data/indexes
+      - LOG_DIR=/app/data/logs
+      - TRACE_DIR=/app/data/traces
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+    depends_on:
+      - backend
